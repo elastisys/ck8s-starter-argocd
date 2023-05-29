@@ -1,0 +1,82 @@
+name: Deploy to Compliant Kubernetes
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  DOMAIN: CHANGE_ME
+  APP_DOMAIN: demoapp.CHANGE_ME
+  DOCKER_USER: 'robot$CHANGE+ME'
+  REGISTRY_PROJECT: CHANGE_ME
+  HELM_RELEASE: ${{ github.ref_name }}
+  TAG: ${{ github.ref_name }}-${{ github.sha }}
+
+jobs:
+  build-push-deploy:
+    name: Deploy application
+    runs-on: ubuntu-latest
+
+    environment:
+      name: development
+      url: https://${{ env.APP_DOMAIN }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - name: Login to container registry
+      env:
+        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+      run: |-
+        echo $DOCKER_PASSWORD \
+          | docker login --username $DOCKER_USER --password-stdin harbor.$DOMAIN
+
+    - name: Build and push container image
+      run: |-
+        docker build -t harbor.$DOMAIN/$REGISTRY_PROJECT/ck8s-user-demo:${{ env.TAG }} .
+        docker push harbor.$DOMAIN/$REGISTRY_PROJECT/ck8s-user-demo:${{ env.TAG }}
+
+    - name: Set up SSH
+      run: |-
+        mkdir -p ~/.ssh/
+        echo "${{ secrets.SSH_PRIVKEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+    
+    - name: Set git config and clone target repo
+      run: |-
+        git config --global url."ssh://github.com/".insteadOf "https://github.com/"
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git clone git@github.com:${{ secrets.REPO_OWNER }}/${{ secrets.REPO_TARGET }}.git
+
+    - name: Make changes and push
+      run: |-
+        cd ${{ secrets.REPO_TARGET }}/ck8s-user-demo/
+        export CUR_REPO=$(grep 'repository:' values.yaml | sed 's/.*: *//')
+        export CUR_TAG=$(grep 'tag:' values.yaml | sed 's/.*: *//')
+        export CUR_PULLPOL=$(grep 'pullPolicy:' values.yaml | sed 's/.*: *//')
+        export CUR_HOSTNAME=$(grep 'hostname:' values.yaml | sed 's/.*: *//')
+        sed -i "s|repository: $CUR_REPO|repository: harbor.$DOMAIN/$REGISTRY_PROJECT/ck8s-user-demo|g" values.yaml
+        sed -i "s|tag: $CUR_TAG|tag: $TAG|g" values.yaml
+        sed -i "s|pullPolicy: $CUR_PULLPOL|pullPolicy: Always|g" values.yaml
+        sed -i "s|hostname: $CUR_HOSTNAME|hostname: $APP_DOMAIN|g" values.yaml
+        git add values.yaml
+        git commit -m "Tag: $TAG"
+        git push origin main
+
+
+  show-log-url:
+    name: View application logs
+    runs-on: ubuntu-latest
+
+    environment:
+      name: logging
+      url: https://opensearch.${{ env.DOMAIN }}/app/discover#/?_a=(filters:!((query:(match_phrase:(kubernetes.labels.app_kubernetes_io%2Finstance:${{ env.HELM_RELEASE }})))),index:'8189b060-2d66-11ea-8c64-79e207e2e1ca',interval:auto,query:(language:kuery,query:''),sort:!())
+
+    steps:
+      - name: View application logs
+        run: |-
+          echo "https://opensearch.${{ env.DOMAIN }}/app/discover#/?_a=(filters:!((query:(match_phrase:(kubernetes.labels.app_kubernetes_io%2Finstance:${{ env.HELM_RELEASE }})))),index:'8189b060-2d66-11ea-8c64-79e207e2e1ca',interval:auto,query:(language:kuery,query:''),sort:!())"
